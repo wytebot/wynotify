@@ -29,11 +29,28 @@ Developers still get SDK/API integration tools under **Advanced tools**.
 
 - **Click-through tracking** (free, all plans) — every notification now records how many customers actually tapped it, shown next to sent/failed counts. Click analytics are built into WyNotify so owners can see engagement without building a separate tracking system.
 - **100 free sends/month** — WyNotify no longer charges based on subscriber count. The first 100 notification campaigns each month are free; after that the workspace must upgrade.
-- **Scheduled sending** (Pro and Business) — compose a message and pick a future date/time instead of sending immediately. A Vercel Cron job (`/api?action=processScheduled`, every 5 minutes) flushes due messages. Requires a new `CRON_SECRET` environment variable (see below) — Vercel sends it automatically as a bearer token once you set it.
+- **Scheduled sending** (Pro and Business) — compose a message and pick a future date/time instead of sending immediately. A Vercel Cron job (`/api?action=processScheduled`) flushes due messages. Requires a new `CRON_SECRET` environment variable (see below) — Vercel sends it automatically as a bearer token once you set it.
 
 ### New/updated environment variable
 
 - `CRON_SECRET` — a random string (16+ chars). Set it in Vercel's env vars; Vercel automatically sends it as `Authorization: Bearer $CRON_SECRET` when it invokes the cron job, and the API checks it against that header. Without it the cron endpoint still works but is unauthenticated — set it before going live.
+
+### Cron schedule (choose before you deploy)
+
+Vercel's **Hobby plan only allows a cron to run once per day**; Pro and higher allow finer schedules (down to once a minute). The schedule lives in `vercel.json`:
+
+```json
+"crons": [
+  { "path": "/api?action=processScheduled", "schedule": "0 6 * * *" }
+]
+```
+
+That value is read from the repo at deploy time — it cannot be set from an environment variable — so pick the UTC hour that suits your audience and edit that line directly before deploying:
+
+- On **Hobby**, use a daily cron (e.g. `0 6 * * *` = 06:00 UTC). Scheduled notifications are only checked once a day, so an item scheduled for 2pm may not go out until the next run — up to ~24h later. Recurring "daily"/"weekly" sends will land consistently at whatever hour you pick here.
+- On **Pro or higher**, you can go back to a tighter schedule (e.g. `*/5 * * * *`) for near-real-time delivery.
+
+The in-app Scheduling page and the "Schedule for later" composer both show a note that scheduled sends are checked once a day, so keep that in mind if you change the cadence back to something more frequent — the copy assumes daily unless you also update it.
 
 ### Ideas for future product improvements
 
