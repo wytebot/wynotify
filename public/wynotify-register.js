@@ -25,6 +25,8 @@
   const style = document.createElement("style");
   style.textContent = `
     .wynotify-subscribe{font:600 14px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border:1px solid var(--wy-border,#0002);border-radius:var(--wy-radius,10px);padding:11px 16px;background:var(--wy-accent,#111827);color:var(--wy-text,#fff);cursor:pointer;box-shadow:0 2px 10px #0002;transition:.18s ease}
+    .wynotify-subscribe.wynotify-float{position:fixed;bottom:20px;right:20px;z-index:2147483647}
+    @media(max-width:480px){.wynotify-subscribe.wynotify-float{bottom:14px;right:14px;left:14px;text-align:center}}
     .wynotify-subscribe:hover{filter:brightness(.96);transform:translateY(-1px)}
     .wynotify-subscribe:disabled{opacity:.65;cursor:wait;transform:none}
     .wynotify-subscribe.ok{background:var(--wy-success,#166534)}
@@ -126,9 +128,17 @@
     backdrop.addEventListener("click", e => { if (e.target === backdrop) close(); });
   }
   function mount() {
-    const button = document.createElement("button"); button.type = "button"; button.className = "wynotify-subscribe"; button.textContent = label;
+    const autoPlaced = script.parentNode === document.head;
+    const button = document.createElement("button"); button.type = "button"; button.className = "wynotify-subscribe" + (autoPlaced ? " wynotify-float" : ""); button.textContent = label;
     button.addEventListener("click", () => showPrompt(button));
-    const target = script.parentNode === document.head ? document.body : script.parentNode;
+    // When the snippet sits in <head> (the documented setup), there is no
+    // natural place in the page to drop the button, so it's appended to
+    // <body> and floated in a fixed corner via .wynotify-float — otherwise
+    // it silently lands at the very end of the page's DOM flow, off-screen
+    // unless the visitor scrolls all the way down. If the developer placed
+    // the script tag inline somewhere in <body> on purpose, respect that
+    // exact spot and render the button inline there instead.
+    const target = autoPlaced ? document.body : script.parentNode;
     if (target) target.appendChild(button);
     window.WyNotify = window.WyNotify || {}; window.WyNotify.subscribe = () => showPrompt(button);
   }

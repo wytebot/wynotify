@@ -246,13 +246,13 @@ function chunkArray(arr, size) {
   return out;
 }
 
-async function deliverToDevices({ deliverable, title, message, url, notificationId }) {
+async function deliverToDevices({ deliverable, title, message, url, notificationId, icon = "" }) {
   configureWebPush();
   let successCount = 0, failureCount = 0;
   const invalid = [];
   const apiOrigin = String(process.env.APP_URL || "").replace(/\/$/, "");
   const payload = JSON.stringify({
-    notification: { title, body: message, url: String(url || "/") },
+    notification: { title, body: message, url: String(url || "/"), ...(icon ? { icon, badge: icon } : {}) },
     data: { url: String(url || "/"), notificationId, clickApi: apiOrigin ? `${apiOrigin}/api?action=trackClick` : "" }
   });
   // Web Push sends one encrypted request per browser subscription. Keep concurrency bounded.
@@ -279,7 +279,19 @@ async function deliverToDevices({ deliverable, title, message, url, notification
 
 async function workspaceSettings(workspaceId) {
   const snap = await db().collection("workspaceSettings").doc(workspaceId).get();
-  return snap.exists ? snap.data() : { dailyCap: 3, quietMinutes: 60 };
+  return snap.exists ? { dailyCap: 3, quietMinutes: 60, icon: null, ...snap.data() } : { dailyCap: 3, quietMinutes: 60, icon: null };
+}
+// Only http(s) image-looking URLs are accepted — this value is fetched
+// directly by every recipient's browser to render as the notification icon,
+// so it must be a plain, publicly reachable absolute URL.
+function validIconUrl(value) {
+  const v = String(value || "").trim();
+  if (!v) return "";
+  if (v.length > 2048) throw new Error("Icon URL is too long.");
+  let parsed;
+  try { parsed = new URL(v); } catch { throw new Error("Enter a valid image URL."); }
+  if (parsed.protocol !== "https:") throw new Error("Icon URL must start with https://.");
+  return parsed.href;
 }
 async function devicesMatching(workspaceId, audience = "all", segmentId = "") {
   const devices = await activeDevices(workspaceId);
@@ -311,7 +323,8 @@ async function deliverCampaign({uid, workspaceId, plan, title, message, url, aud
   const quota = await reserveNotificationSlot(workspaceId, plan);
   if (!quota.allowed) return { ok:false, error:`Monthly notification limit reached (${quota.limit}).`, quotaExceeded:true };
   const notificationId=id("notification");
-  const result=await deliverToDevices({deliverable,title,message,url,notificationId});
+  const settings=await workspaceSettings(workspaceId);
+  const result=await deliverToDevices({deliverable,title,message,url,notificationId,icon:settings.icon||""});
   await db().collection("notifications").doc(notificationId).set({uid,workspaceId,title,message,audience,segmentId:segmentId||null,variant,count:result.tokens.length,successCount:result.successCount,failureCount:result.failureCount,clicks:0,status:result.successCount?"sent":"failed",scheduled,createdAt:admin.firestore.FieldValue.serverTimestamp()});
   if(result.invalid.length) await Promise.all(result.invalid.map(x=>db().collection("devices").doc(x).set({active:false,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true})));
   return {ok:true,notificationId,matched:result.tokens.length,sent:result.successCount,failed:result.failureCount};
@@ -518,6 +531,19 @@ export default async function handler(req, res) {
       const user=await requireUser(req); const b=await bodyOf(req); const {workspace,user:userData}=await workspaceForUser(user.uid); const sub=subscriptionInfo(userData); if(!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).frequency)return json(res,402,{error:"Frequency controls require Starter or higher."});
       const dailyCap=Math.max(1,Math.min(20,Number(b.dailyCap||3))); const quietMinutes=Math.max(0,Math.min(1440,Number(b.quietMinutes||0))); await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,dailyCap,quietMinutes,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); return json(res,200,{ok:true,settings:{dailyCap,quietMinutes}});
     }
+    // Notification icon: free on every plan, unlike the other workspaceSettings
+    // fields (dailyCap/quietMinutes) which are gated behind the "frequency"
+    // plan feature above. Deliberately not sharing that gate.
+    if (req.method === "GET" && action === "icon") {
+      const user=await requireUser(req); const {workspace}=await workspaceForUser(user.uid);
+      const settings=await workspaceSettings(workspace.id); return json(res,200,{ok:true,iconUrl:settings.icon||""});
+    }
+    if (req.method === "POST" && action === "icon") {
+      const user=await requireUser(req); const b=await bodyOf(req); const {workspace}=await workspaceForUser(user.uid);
+      let iconUrl; try { iconUrl=validIconUrl(b.iconUrl); } catch(e) { return json(res,400,{error:e.message}); }
+      await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,icon:iconUrl||null,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+      return json(res,200,{ok:true,iconUrl});
+    }
     if (req.method === "GET" && action === "tags") {
       const user=await requireUser(req); const {workspace}=await workspaceForUser(user.uid); const snap=await db().collection("devices").where("workspaceId","==",workspace.id).get(); const counts={}; snap.docs.forEach(d=>(d.data().tags||[]).forEach(t=>{const k=String(t).trim();if(k)counts[k]=(counts[k]||0)+1;})); return json(res,200,{ok:true,tags:Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([name,count])=>({name,count}))});
     }
@@ -614,6 +640,14 @@ export default async function handler(req, res) {
     return json(res, 404, { error: "Route not found." });
   } catch (e) {
     console.error("WyNotify API error", e);
-    return json(res, e.status || 500, { error: e.message || "Internal server error." });
+    // Firestore's own error message for a missing composite index is a long
+    // raw string containing a full Firebase console URL — useful in the
+    // server logs (still logged above in full) but not something to show a
+    // user in place of "Sent"/"Connected". Recognize it and return a short
+    // message instead; the real fix is deploying firestore.indexes.json (or
+    // creating the index from the link in the Vercel function logs).
+    const isMissingIndex = e.code === 9 || e.code === "failed-precondition" || /requires an index/i.test(String(e.message || ""));
+    const message = isMissingIndex ? "This feature needs a one-time database setup step. Check the server logs or contact support." : (e.message || "Internal server error.");
+    return json(res, e.status || 500, { error: message });
   }
 }
