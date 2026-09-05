@@ -306,9 +306,23 @@ async function devicesMatching(workspaceId, audience = "all", segmentId = "") {
 }
 async function checkFrequency(workspaceId, devices, settings) {
   const cap = Math.max(1, Math.min(20, Number(settings.dailyCap || 3)));
-  const since = new Date(Date.now() - 24 * 3600 * 1000);
-  const snap = await db().collection("notifications").where("workspaceId", "==", workspaceId).where("createdAt", ">=", admin.firestore.Timestamp.fromDate(since)).limit(100).get();
-  const recent = snap.docs.map(d => d.data());
+  const sinceMs = Date.now() - 24 * 3600 * 1000;
+
+  // Do not require a composite Firestore index just to send a notification.
+  // The previous query combined workspaceId + a createdAt range, which makes
+  // Firestore require a composite index. Query by the single equality field
+  // and apply the 24-hour filter in memory instead. This keeps sending usable
+  // immediately after Firebase is connected, while firestore.indexes.json still
+  // contains the optimized dashboard index for larger workspaces.
+  const snap = await db().collection("notifications")
+    .where("workspaceId", "==", workspaceId)
+    .get();
+  const recent = snap.docs
+    .map(d => d.data())
+    .filter(x => {
+      const value = x.createdAt?.toDate?.()?.getTime?.() || (x.createdAt ? new Date(x.createdAt).getTime() : 0);
+      return value >= sinceMs;
+    });
   const campaignIds = new Set(recent.map((x, i) => String(x.campaignId || x.abTestId || `doc-${i}`)));
   if (campaignIds.size >= cap) return { allowed: false, reason: `Frequency cap reached: ${cap} campaigns in the last 24 hours.` };
   const quiet = Math.max(0, Math.min(1440, Number(settings.quietMinutes || 0)));
@@ -647,7 +661,9 @@ export default async function handler(req, res) {
     // message instead; the real fix is deploying firestore.indexes.json (or
     // creating the index from the link in the Vercel function logs).
     const isMissingIndex = e.code === 9 || e.code === "failed-precondition" || /requires an index/i.test(String(e.message || ""));
-    const message = isMissingIndex ? "This feature needs a one-time database setup step. Check the server logs or contact support." : (e.message || "Internal server error.");
+    const message = isMissingIndex
+      ? "A Firestore index is missing for this workspace query. Sending now uses an index-free fallback where possible; if this is the dashboard, deploy firestore.indexes.json to the same Firebase project used by FIREBASE_SERVICE_ACCOUNT_JSON."
+      : (e.message || "Internal server error.");
     return json(res, e.status || 500, { error: message });
   }
 }

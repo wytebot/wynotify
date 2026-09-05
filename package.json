@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "prebuild": "node scripts/generate-sw.mjs",
-    "generate:vapid": "node scripts/generate-vapid.mjs"
+    "generate:vapid": "node scripts/generate-vapid.mjs",
+    "firebase:deploy": "npx firebase-tools deploy --only firestore:indexes,firestore:rules",
+    "firebase:setup": "npm run firebase:deploy"
   },
   "dependencies": {
     "firebase": "^12.3.0",
