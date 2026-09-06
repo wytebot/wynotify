@@ -26,10 +26,10 @@ const PLANS = {
 // Fixed NGN checkout equivalents shown by the pricing page: $5 = ₦7,500, $10 = ₦15,000, $15 = ₦22,500.
 const PLAN_PRICES = { starter: 7500, pro: 15000, business: 22500 };
 const PLAN_FEATURES = {
-  free: { scheduling: false, clickTracking: true, rss: false, automation: false, abTesting: false, smartTiming: false, frequency: false, segments: false, inbox: true, api: false },
-  starter: { scheduling: false, clickTracking: true, rss: true, automation: false, abTesting: false, smartTiming: false, frequency: true, segments: true, inbox: true, api: false },
-  pro: { scheduling: true, clickTracking: true, rss: true, automation: true, abTesting: true, smartTiming: false, frequency: true, segments: true, inbox: true, api: true },
-  business: { scheduling: true, clickTracking: true, rss: true, automation: true, abTesting: true, smartTiming: true, frequency: true, segments: true, inbox: true, api: true }
+  free: { scheduling: false, clickTracking: true, rss: false, automation: false, abTesting: false, smartTiming: false, segments: false, inbox: true, api: false },
+  starter: { scheduling: false, clickTracking: true, rss: true, automation: false, abTesting: false, smartTiming: false, segments: true, inbox: true, api: false },
+  pro: { scheduling: true, clickTracking: true, rss: true, automation: true, abTesting: true, smartTiming: false, segments: true, inbox: true, api: true },
+  business: { scheduling: true, clickTracking: true, rss: true, automation: true, abTesting: true, smartTiming: true, segments: true, inbox: true, api: true }
 };
 function webPushReady() {
   return Boolean(process.env.WEB_PUSH_PUBLIC_KEY && process.env.WEB_PUSH_PRIVATE_KEY && process.env.WEB_PUSH_SUBJECT);
@@ -279,7 +279,7 @@ async function deliverToDevices({ deliverable, title, message, url, notification
 
 async function workspaceSettings(workspaceId) {
   const snap = await db().collection("workspaceSettings").doc(workspaceId).get();
-  return snap.exists ? { dailyCap: 3, quietMinutes: 0, icon: null, ...snap.data() } : { dailyCap: 3, quietMinutes: 0, icon: null };
+  return snap.exists ? { icon: snap.data()?.icon || null } : { icon: null };
 }
 // Only http(s) image-looking URLs are accepted — this value is fetched
 // directly by every recipient's browser to render as the notification icon,
@@ -303,33 +303,6 @@ async function devicesMatching(workspaceId, audience = "all", segmentId = "") {
   }
   if (audience === "all") return devices;
   return devices.filter(d => d.subscriberType === audience || d.tags?.includes(audience));
-}
-async function checkFrequency(workspaceId, devices, settings) {
-  const cap = Math.max(1, Math.min(20, Number(settings.dailyCap || 3)));
-  const sinceMs = Date.now() - 24 * 3600 * 1000;
-
-  // Do not require a composite Firestore index just to send a notification.
-  // The previous query combined workspaceId + a createdAt range, which makes
-  // Firestore require a composite index. Query by the single equality field
-  // and apply the 24-hour filter in memory instead. This keeps sending usable
-  // immediately after Firebase is connected, while firestore.indexes.json still
-  // contains the optimized dashboard index for larger workspaces.
-  const snap = await db().collection("notifications")
-    .where("workspaceId", "==", workspaceId)
-    .get();
-  const recent = snap.docs
-    .map(d => d.data())
-    .filter(x => {
-      const value = x.createdAt?.toDate?.()?.getTime?.() || (x.createdAt ? new Date(x.createdAt).getTime() : 0);
-      return value >= sinceMs;
-    });
-  const campaignIds = new Set(recent.map((x, i) => String(x.campaignId || x.abTestId || `doc-${i}`)));
-  if (campaignIds.size >= cap) return { allowed: false, reason: `Frequency cap reached: ${cap} campaigns in the last 24 hours.` };
-  // WyNotify intentionally does not block sends based on time since the previous campaign.
-  // A previous version exposed a workspace-wide "quiet period" that could unexpectedly
-  // prevent an owner from sending a notification. Keep the stored field for backwards
-  // compatibility, but do not enforce it.
-  return { allowed: true };
 }
 async function deliverCampaign({uid, workspaceId, plan, title, message, url, audience="all", segmentId="", variant="A", scheduled=false}) {
   const matches = await devicesMatching(workspaceId, audience, segmentId);
@@ -441,8 +414,6 @@ export default async function handler(req, res) {
         const scheduleId=id("schedule"); await db().collection("scheduledNotifications").doc(scheduleId).set({uid:user.uid,workspaceId:workspace.id,title,message,audience,segmentId,url:String(b.url||"/"),sendAt:admin.firestore.Timestamp.fromDate(sendAt),status:"pending",createdAt:admin.firestore.FieldValue.serverTimestamp(),recurrence});
         return json(res,200,{ok:true,scheduled:true,scheduleId,sendAt:sendAt.toISOString()});
       }
-      const freq=await checkFrequency(workspace.id,[],await workspaceSettings(workspace.id));
-      if(!freq.allowed) return json(res,429,{error:freq.reason,code:"FREQUENCY_CAP"});
       const result=await deliverCampaign({uid:user.uid,workspaceId:workspace.id,plan:sub.plan,title,message,url:b.url,audience,segmentId});
       if(!result.ok)return json(res,result.quotaExceeded?402:400,{error:result.error,code:result.quotaExceeded?"NOTIFICATION_QUOTA_EXCEEDED":undefined});
       return json(res,200,result);
@@ -462,12 +433,6 @@ export default async function handler(req, res) {
           const ownerData = ownerSnap.exists ? ownerSnap.data() : {};
           const sub = subscriptionInfo(ownerData);
           if (!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).scheduling) { await doc.ref.set({status:"failed",error:"Scheduled sending is no longer available on the current plan.",processedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); processed++; continue; }
-          const freq = await checkFrequency(s.workspaceId, [], await workspaceSettings(s.workspaceId));
-          if (!freq.allowed) {
-            const retry = new Date(Date.now() + 15 * 60000);
-            await doc.ref.set({ sendAt: admin.firestore.Timestamp.fromDate(retry), lastError: freq.reason, processedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            processed++; continue;
-          }
           const result = await deliverCampaign({ uid:s.uid, workspaceId:s.workspaceId, plan:sub.plan, title:s.title, message:s.message, url:s.url, audience:s.audience||"all", segmentId:s.segmentId||"", scheduled:true });
           if (!result.ok) {
             if (result.quotaExceeded) await doc.ref.set({status:"failed",error:result.error,quotaExceeded:true,processedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
@@ -496,8 +461,6 @@ export default async function handler(req, res) {
             const ownerData = owner.exists ? owner.data() : {};
             const sub = subscriptionInfo(ownerData);
             if (!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).automation) { await ad.ref.set({enabled:false,lastError:"Automation requires Pro or Business."},{merge:true}); continue; }
-            const freq = await checkFrequency(a.workspaceId, [], await workspaceSettings(a.workspaceId));
-            if (!freq.allowed) { await ad.ref.set({lastError:freq.reason,lastRunAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); continue; }
             const result = await deliverCampaign({uid:a.uid,workspaceId:a.workspaceId,plan:sub.plan,title:a.title||"WyNotify update",message:a.message||"You have a new update.",url:a.url||"/",audience:a.audience||"all"});
             if (result.ok) {
               const nextRun = a.recurrence === "weekly" ? new Date(next) : a.recurrence === "daily" ? new Date(next) : null;
@@ -534,7 +497,7 @@ export default async function handler(req, res) {
     if (req.method === "POST" && action === "restoreData") {
       const user=await requireUser(req); const b=await bodyOf(req); if(!b||![4,5].includes(Number(b.version))||!b.workspace)return json(res,400,{error:"Invalid WyNotify backup."}); const {workspace}=await workspaceForUser(user.uid);
       const cleanTS=(v)=>v?admin.firestore.Timestamp.fromDate(new Date(v)):admin.firestore.FieldValue.serverTimestamp();
-      if (b.settings) await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,dailyCap:Math.max(1,Math.min(20,Number(b.settings.dailyCap||3))),quietMinutes:Math.max(0,Math.min(1440,Number(b.settings.quietMinutes||60)))},{merge:true});
+      if (b.settings) await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,icon:b.settings.icon||null},{merge:true});
       const groups=["segments","automations","abTests","scheduled","notifications"];
       for(const collection of groups){const rows=Array.isArray(b[collection])?b[collection].slice(0,500):[]; for(const row of rows){const data={...row,workspaceId:workspace.id,uid:user.uid}; delete data.id; delete data.subscription; if(data.createdAt)data.createdAt=cleanTS(data.createdAt); if(data.sendAt)data.sendAt=cleanTS(data.sendAt); if(data.nextRunAt)data.nextRunAt=cleanTS(data.nextRunAt); if(collection==="notifications") { delete data.clickApi; } await db().collection(collection==="scheduled"?"scheduledNotifications":collection).doc(String(row.id||id(collection))).set(data,{merge:true}); }}
       return json(res,200,{ok:true,restored:true,message:"Workspace configuration and message history restored. Subscriber push credentials and billing status were intentionally not restored."});
@@ -542,13 +505,8 @@ export default async function handler(req, res) {
     if (req.method === "GET" && action === "settings") {
       const user=await requireUser(req); const {workspace}=await workspaceForUser(user.uid); return json(res,200,{ok:true,settings:await workspaceSettings(workspace.id)});
     }
-    if (req.method === "POST" && action === "settings") {
-      const user=await requireUser(req); const b=await bodyOf(req); const {workspace,user:userData}=await workspaceForUser(user.uid); const sub=subscriptionInfo(userData); if(!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).frequency)return json(res,402,{error:"Frequency controls require Starter or higher."});
-      const dailyCap=Math.max(1,Math.min(20,Number(b.dailyCap||3))); await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,dailyCap,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); return json(res,200,{ok:true,settings:{dailyCap,quietMinutes:0}});
-    }
     // Notification icon: free on every plan, unlike the other workspaceSettings
-    // fields (dailyCap) which are gated behind the "frequency"
-    // plan feature above. Deliberately not sharing that gate.
+    // icon is a workspace-level branding setting and is available on every plan.
     if (req.method === "GET" && action === "icon") {
       const user=await requireUser(req); const {workspace}=await workspaceForUser(user.uid);
       const settings=await workspaceSettings(workspace.id); return json(res,200,{ok:true,iconUrl:settings.icon||""});
@@ -579,7 +537,7 @@ export default async function handler(req, res) {
     }
     if (req.method === "POST" && action === "abRun") {
       const user=await requireUser(req); const b=await bodyOf(req); const {workspace,user:userData}=await workspaceForUser(user.uid); const sub=subscriptionInfo(userData); if(!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).abTesting)return json(res,402,{error:"A/B testing requires Pro or Business."});
-      const a=String(b.variantA||"").trim(), bb=String(b.variantB||"").trim(); if(!a||!bb)return json(res,400,{error:"Both variants are required."}); const testId=id("ab"); const matches=await devicesMatching(workspace.id,String(b.audience||"all"),String(b.segmentId||"")); const deliverable=matches.filter(d=>d.subscription?.endpoint&&d.subscription?.keys?.p256dh&&d.subscription?.keys?.auth); if(deliverable.length<2)return json(res,400,{error:"At least two active subscribers are required for an A/B test."}); const freq=await checkFrequency(workspace.id,[],await workspaceSettings(workspace.id)); if(!freq.allowed)return json(res,429,{error:freq.reason}); const quota=await reserveNotificationSlot(workspace.id,sub.plan); if(!quota.allowed)return json(res,402,{error:`Monthly notification limit reached (${quota.limit}).`,code:"NOTIFICATION_QUOTA_EXCEEDED"});
+      const a=String(b.variantA||"").trim(), bb=String(b.variantB||"").trim(); if(!a||!bb)return json(res,400,{error:"Both variants are required."}); const testId=id("ab"); const matches=await devicesMatching(workspace.id,String(b.audience||"all"),String(b.segmentId||"")); const deliverable=matches.filter(d=>d.subscription?.endpoint&&d.subscription?.keys?.p256dh&&d.subscription?.keys?.auth); if(deliverable.length<2)return json(res,400,{error:"At least two active subscribers are required for an A/B test."}); const quota=await reserveNotificationSlot(workspace.id,sub.plan); if(!quota.allowed)return json(res,402,{error:`Monthly notification limit reached (${quota.limit}).`,code:"NOTIFICATION_QUOTA_EXCEEDED"});
       for(let i=deliverable.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[deliverable[i],deliverable[j]]=[deliverable[j],deliverable[i]];} const mid=Math.ceil(deliverable.length/2); const groups=[["A",a,deliverable.slice(0,mid)],["B",bb,deliverable.slice(mid)]]; const results=[]; for(const [variant,text,group] of groups){if(!group.length)continue; const nid=id("notification"); const r=await deliverToDevices({deliverable:group,title:String(b.title||"Notification"),message:text,url:b.url,notificationId:nid}); await db().collection("notifications").doc(nid).set({uid:user.uid,workspaceId:workspace.id,title:String(b.title||"Notification"),message:text,audience:String(b.audience||"all"),segmentId:String(b.segmentId||"")||null,variant,abTestId:testId,campaignId:testId,count:r.tokens.length,successCount:r.successCount,failureCount:r.failureCount,clicks:0,status:r.successCount?"sent":"failed",createdAt:admin.firestore.FieldValue.serverTimestamp()}); if(r.invalid.length)await Promise.all(r.invalid.map(x=>db().collection("devices").doc(x).set({active:false},{merge:true}))); results.push({variant,matched:r.tokens.length,sent:r.successCount,failed:r.failureCount}); }
       await db().collection("abTests").doc(testId).set({uid:user.uid,workspaceId:workspace.id,title:String(b.title||"Notification"),variantA:a,variantB:bb,status:"sent",audience:String(b.audience||"all"),createdAt:admin.firestore.FieldValue.serverTimestamp(),results}); return json(res,200,{ok:true,testId,results});
     }

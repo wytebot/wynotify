@@ -220,12 +220,12 @@ The public configuration endpoint returns only the WyNotify Web Push public key.
 - **Backend now enforces the developer API plan gate:** the dashboard already showed "API & Webhooks" as a Pro-plan feature, but the server never actually checked plan tier before minting or accepting an API key — a Free or Starter workspace could generate and use one directly against the API, bypassing the UI. `apiKey` generation and every API-key-authenticated request now check the workspace's current plan.
 - **Removed dead code:** an unused, out-of-sync duplicate of the customer subscribe flow (`registerCustomerPush` in `src/firebase.js`) and an orphaned backend action (`abTest`, superseded by `abRun` and never called from the dashboard) have been removed to reduce future drift risk.
 
-## v4.15.1 current release
+## v4.15.3 current release
 
 The dashboard uses hashed Vite assets plus no-store HTML/API/service-worker responses and a version manifest to prevent stale releases from remaining active after deployment.
-- Plans: Free $0, Starter $5 / ₦7,500, Pro $10 / ₦15,000, Business $15 / ₦22,500.
+- Plans: Free $0, Starter $5 / ₦7,500, Pro $10 / ₦15,000, Business $15 / ₦22,500. Free includes 100 notification campaigns per calendar month with no daily sending limit.
 - Subscriber count remains unlimited; plans are based on notification sends.
 - Added a collapsible Features hub so advanced tools do not clutter the main dashboard.
-- Added RSS feed checker, frequency controls, A/B testing workspace, working scheduled/recurring automations, statistical smart-timing view, embeddable notification inbox, subscriber tags/segments, private server API keys, and WordPress plugin.
+- Added RSS feed checker, A/B testing workspace, working scheduled/recurring automations, statistical smart-timing view, embeddable notification inbox, subscriber tags/segments, private server API keys, and WordPress plugin.
 - No email or SMS provider is included.
 - No AI API is required by these features.

@@ -10,7 +10,7 @@
  * /wynotify-push-sw.js. No provider account or notification SDK is required on the customer website.
  */
 (function () {
-  const WYN_NOTIFY_VERSION = "4.15.2";
+  const WYN_NOTIFY_VERSION = "4.15.3";
   "use strict";
   const script = document.currentScript;
   if (!script) return;
