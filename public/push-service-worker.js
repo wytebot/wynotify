@@ -1,4 +1,4 @@
-/* WyNotify dashboard push worker v4.15.1. No Firebase Messaging SDK is used for push. */
+/* WyNotify dashboard push worker v4.15.2. No Firebase Messaging SDK is used for push. */
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil((async () => {
   const keys = await caches.keys();

@@ -279,7 +279,7 @@ async function deliverToDevices({ deliverable, title, message, url, notification
 
 async function workspaceSettings(workspaceId) {
   const snap = await db().collection("workspaceSettings").doc(workspaceId).get();
-  return snap.exists ? { dailyCap: 3, quietMinutes: 60, icon: null, ...snap.data() } : { dailyCap: 3, quietMinutes: 60, icon: null };
+  return snap.exists ? { dailyCap: 3, quietMinutes: 0, icon: null, ...snap.data() } : { dailyCap: 3, quietMinutes: 0, icon: null };
 }
 // Only http(s) image-looking URLs are accepted — this value is fetched
 // directly by every recipient's browser to render as the notification icon,
@@ -325,9 +325,10 @@ async function checkFrequency(workspaceId, devices, settings) {
     });
   const campaignIds = new Set(recent.map((x, i) => String(x.campaignId || x.abTestId || `doc-${i}`)));
   if (campaignIds.size >= cap) return { allowed: false, reason: `Frequency cap reached: ${cap} campaigns in the last 24 hours.` };
-  const quiet = Math.max(0, Math.min(1440, Number(settings.quietMinutes || 0)));
-  const latest = recent.map(x => x.createdAt?.toDate?.()?.getTime?.() || 0).sort((a,b)=>b-a)[0] || 0;
-  if (quiet && latest && Date.now() - latest < quiet * 60000) return { allowed: false, reason: `Quiet period active. Try again in about ${Math.ceil((quiet*60000-(Date.now()-latest))/60000)} minute(s).` };
+  // WyNotify intentionally does not block sends based on time since the previous campaign.
+  // A previous version exposed a workspace-wide "quiet period" that could unexpectedly
+  // prevent an owner from sending a notification. Keep the stored field for backwards
+  // compatibility, but do not enforce it.
   return { allowed: true };
 }
 async function deliverCampaign({uid, workspaceId, plan, title, message, url, audience="all", segmentId="", variant="A", scheduled=false}) {
@@ -543,10 +544,10 @@ export default async function handler(req, res) {
     }
     if (req.method === "POST" && action === "settings") {
       const user=await requireUser(req); const b=await bodyOf(req); const {workspace,user:userData}=await workspaceForUser(user.uid); const sub=subscriptionInfo(userData); if(!(PLAN_FEATURES[sub.plan]||PLAN_FEATURES.free).frequency)return json(res,402,{error:"Frequency controls require Starter or higher."});
-      const dailyCap=Math.max(1,Math.min(20,Number(b.dailyCap||3))); const quietMinutes=Math.max(0,Math.min(1440,Number(b.quietMinutes||0))); await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,dailyCap,quietMinutes,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); return json(res,200,{ok:true,settings:{dailyCap,quietMinutes}});
+      const dailyCap=Math.max(1,Math.min(20,Number(b.dailyCap||3))); await db().collection("workspaceSettings").doc(workspace.id).set({workspaceId:workspace.id,dailyCap,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true}); return json(res,200,{ok:true,settings:{dailyCap,quietMinutes:0}});
     }
     // Notification icon: free on every plan, unlike the other workspaceSettings
-    // fields (dailyCap/quietMinutes) which are gated behind the "frequency"
+    // fields (dailyCap) which are gated behind the "frequency"
     // plan feature above. Deliberately not sharing that gate.
     if (req.method === "GET" && action === "icon") {
       const user=await requireUser(req); const {workspace}=await workspaceForUser(user.uid);
